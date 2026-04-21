@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import importlib
+import inspect
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,26 +37,105 @@ class WavJEPAInferenceWrapper:
         class_name: str,
         encoder_output: str,
     ) -> None:
-        self.backend = backend
+        self.backend = self._resolve_backend(backend, model_path, module, class_name)
         self.encoder_output = encoder_output
         self.device = torch.device(device)
 
-        if backend == "torchscript":
+        if self.backend == "torchscript":
             if not model_path:
                 raise ValueError("--model-path is required when --backend=torchscript")
             self.model = torch.jit.load(model_path, map_location=self.device)
-        elif backend == "python":
+        elif self.backend == "python":
             if not module or not class_name:
                 raise ValueError("--module and --class-name are required when --backend=python")
             mod = importlib.import_module(module)
             cls = getattr(mod, class_name)
             self.model = cls(model_path)
+        elif self.backend == "python-ckpt":
+            if not model_path:
+                raise ValueError("--model-path is required when --backend=python-ckpt")
+            if not module or not class_name:
+                raise ValueError("--module and --class-name are required when --backend=python-ckpt")
+            mod = importlib.import_module(module)
+            cls = getattr(mod, class_name)
+            self.model = self._load_with_lightning(cls, model_path)
+            if self.model is None:
+                self.model = self._build_python_model(cls, model_path)
+                self._load_checkpoint_into_model(self.model, model_path)
         else:
-            raise ValueError(f"unsupported backend: {backend}")
+            raise ValueError(f"unsupported backend: {self.backend}")
 
         self.model.eval()
         if hasattr(self.model, "to"):
             self.model.to(self.device)
+
+    @staticmethod
+    def _resolve_backend(backend: str, model_path: str, module: str, class_name: str) -> str:
+        if backend != "auto":
+            return backend
+        suffix = Path(model_path).suffix.lower()
+        if suffix in {".ts", ".torchscript"}:
+            return "torchscript"
+        if suffix in {".ckpt", ".pt", ".pth"} and module and class_name:
+            return "python-ckpt"
+        if module and class_name:
+            return "python"
+        return "torchscript"
+
+    @staticmethod
+    def _build_python_model(cls: type, model_path: str) -> Any:
+        init_sig = inspect.signature(cls.__init__)
+        param_names = [name for name in init_sig.parameters if name != "self"]
+        if "model_path" in param_names:
+            return cls(model_path=model_path)
+        if param_names:
+            return cls(model_path)
+        return cls()
+
+    def _load_with_lightning(self, cls: type, model_path: str) -> Any | None:
+        loader = getattr(cls, "load_from_checkpoint", None)
+        if loader is None:
+            return None
+        for kwargs in (
+            {"checkpoint_path": model_path, "map_location": self.device, "strict": False},
+            {"checkpoint_path": model_path, "map_location": self.device},
+            {"checkpoint_path": model_path},
+        ):
+            try:
+                return loader(**kwargs)
+            except TypeError:
+                continue
+            except Exception:
+                break
+        return None
+
+    @staticmethod
+    def _extract_state_dict(payload: Any) -> dict[str, torch.Tensor]:
+        if isinstance(payload, dict):
+            for key in ("state_dict", "model_state_dict"):
+                if key in payload and isinstance(payload[key], dict):
+                    return payload[key]
+            if all(isinstance(k, str) for k in payload.keys()):
+                return payload
+        raise ValueError("Could not extract state_dict from checkpoint")
+
+    def _load_checkpoint_into_model(self, model: Any, model_path: str) -> None:
+        payload = torch.load(model_path, map_location=self.device)
+        state_dict = self._extract_state_dict(payload)
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if len(missing) == 0:
+            return
+        strip_prefixes = ("model.", "module.", "net.", "backbone.")
+        stripped_state = {
+            next((k[len(p):] for p in strip_prefixes if k.startswith(p)), k): v
+            for k, v in state_dict.items()
+        }
+        missing_retry, unexpected_retry = model.load_state_dict(stripped_state, strict=False)
+        if len(missing_retry) > len(missing) and len(unexpected_retry) >= len(unexpected):
+            raise RuntimeError(
+                "checkpoint load failed: excessive missing keys after load_state_dict. "
+                f"missing={len(missing)}, unexpected={len(unexpected)}"
+            )
 
     def _pick_from_dict(self, out: dict[str, Any]) -> torch.Tensor:
         encoder_priority = {
@@ -69,6 +149,8 @@ class WavJEPAInferenceWrapper:
             "embedding",
             "x",
             "features",
+            "last_hidden_state",
+            "pooler_output",
         )
 
         for key in keys_to_try:
@@ -87,10 +169,44 @@ class WavJEPAInferenceWrapper:
 
     @torch.inference_mode()
     def encode(self, batch_audio: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
-        if self.backend == "python" and hasattr(self.model, "encode"):
-            out = self.model.encode(batch_audio, lengths)
+        if self.backend == "python-ckpt" and hasattr(self.model, "extract_audio") and hasattr(self.model, "feature_norms"):
+            local = self.model.extract_audio(batch_audio)
+            local = self.model.feature_norms(local)
+            if hasattr(self.model, "post_extraction_mapper") and self.model.post_extraction_mapper is not None:
+                local = self.model.post_extraction_mapper(local)
+            if hasattr(self.model, "pos_encoding_encoder"):
+                local = local + self.model.pos_encoding_encoder[:, : local.shape[1], :].to(local.device)
+
+            mask = torch.zeros((local.shape[0], local.shape[1]), dtype=torch.bool, device=local.device)
+            if hasattr(self.model, "encoder_forward"):
+                out = self.model.encoder_forward(local, src_key_padding_mask=mask)
+            elif hasattr(self.model, "encoder"):
+                out = self.model.encoder(local, src_key_padding_mask=mask)
+            else:
+                out = local
         else:
-            out = self.model(batch_audio, lengths)
+            call_attempts = []
+            if hasattr(self.model, "encode"):
+                call_attempts.extend([
+                    lambda: self.model.encode(batch_audio, lengths),
+                    lambda: self.model.encode(batch_audio),
+                ])
+            call_attempts.extend([
+                lambda: self.model(batch_audio, lengths),
+                lambda: self.model(batch_audio),
+            ])
+
+            out = None
+            last_exc: Exception | None = None
+            for fn in call_attempts:
+                try:
+                    out = fn()
+                    break
+                except TypeError as exc:
+                    last_exc = exc
+                    continue
+            if out is None:
+                raise RuntimeError(f"model forward invocation failed: {last_exc}")
 
         if isinstance(out, dict):
             out = self._pick_from_dict(out)
@@ -118,7 +234,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sample-rate", type=int, default=16000)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--num-workers", type=int, default=0, help="reserved for future use")
-    p.add_argument("--backend", type=str, default="torchscript", choices=["torchscript", "python"])
+    p.add_argument(
+        "--backend",
+        type=str,
+        default="auto",
+        choices=["auto", "torchscript", "python", "python-ckpt"],
+    )
     p.add_argument("--model-path", type=str, default="")
     p.add_argument("--module", type=str, default="")
     p.add_argument("--class-name", type=str, default="")

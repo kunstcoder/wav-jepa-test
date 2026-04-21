@@ -70,6 +70,19 @@ python3 scripts/extract_wavjepa_features.py \
   --model-path /path/to/checkpoint.pt
 ```
 
+### B-1) ckpt 직접 로드 백엔드
+`.ckpt/.pt/.pth`를 state_dict로 로드해야 할 때:
+
+```bash
+python3 scripts/extract_wavjepa_features.py \
+  --manifest data/manifest.csv \
+  --output-dir artifacts/features \
+  --backend python-ckpt \
+  --module my_models.wavjepa_adapter \
+  --class-name MyWavJEPAEncoder \
+  --model-path /path/to/model.ckpt
+```
+
 ### C) 폴더 입력 + recursive 로드
 manifest 없이 폴더를 직접 지정하면 하위 디렉터리를 재귀적으로 스캔해 오디오 파일을 로드합니다.
 
@@ -98,7 +111,30 @@ python3 scripts/extract_wavjepa_features.py \
 - NaN/Inf가 없어야 함
 - 전체 샘플 임베딩 차원이 동일해야 함
 
-## 5. kNN 평가 실행
+## 5. 오디오부터 kNN까지 1-커맨드 실행 (권장)
+
+`run_knn_eval.sh`가 이제 **feature 사전추출 없이**, 오디오 입력부터 kNN 평가까지 한 번에 실행합니다.
+
+```bash
+./run_knn_eval.sh \
+  --extract \
+  --manifest data/manifest.csv \
+  --splits data/splits.csv \
+  --output-dir artifacts/e2e \
+  --features-dir artifacts/e2e/features \
+  --backend python-ckpt \
+  --model-path /path/to/model.ckpt \
+  --module my_models.wavjepa_adapter \
+  --class-name MyWavJEPAEncoder \
+  --k 200 \
+  --metric cosine \
+  --weighting distance \
+  --seed 42
+```
+
+`--features-dir`를 생략하면 기본값으로 `<output-dir>/features`를 사용합니다.
+
+## 6. kNN 평가만 실행 (사전 추출 feature 사용)
 
 ```bash
 ./run_knn_eval.sh \
@@ -116,7 +152,7 @@ python3 scripts/extract_wavjepa_features.py \
 - `artifacts/knn/results.json`
 - `artifacts/knn/run_meta.json`
 
-## 6. 빠른 점검 명령어
+## 7. 빠른 점검 명령어
 
 ```bash
 python3 scripts/extract_wavjepa_features.py --help
@@ -124,7 +160,7 @@ python3 scripts/knn_eval.py --help
 python3 scripts/collect_results.py --help
 ```
 
-## 7. 참고
+## 8. 참고
 
 - `results_knn_comparison.md`에 태스크별/평균 성능표를 채워 리포트로 사용하세요.
 - `run_knn_eval.sh --retry-failed` 옵션으로 실패 태스크 자동 재시도가 가능합니다.

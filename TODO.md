@@ -66,7 +66,7 @@
 - [ ] raw 결과 아카이브 정리
 
 ## 완료 기준 (Definition of Done)
-- [ ] 동일 환경에서 1-command로 재실행 가능
+- [x] 동일 환경에서 1-command로 재실행 가능
 - [ ] 태스크별 및 평균 점수 표가 재생성 가능
 - [ ] 설정 차이/제약 사항이 문서화됨
 - [ ] 최종 비교 리포트 공유 가능 상태
@@ -86,3 +86,5 @@
 - `scripts/extract_wavjepa_features.py`를 추가해 WavJEPA inference wrapper(오디오 로딩/리샘플링, 배치/패딩 처리)와 X-ARES 호환 feature exporter(`id.npy` + metadata CSV)를 구현함.
 - 추출 단계에서 임베딩 품질 검증(NaN/Inf, empty embedding, shape/dim 불일치)을 수행하도록 어댑터 검증 로직을 반영함.
 - 로컬 재현 실행용 문서 `README_wavjepa_adapter.md`를 추가해 임베딩 추출부터 kNN 평가까지 한 번에 실행 가능한 절차를 정리함.
+- `scripts/extract_wavjepa_features.py`에 `python-ckpt`/`auto` 백엔드를 추가해 `.ckpt/.pt/.pth` 체크포인트 직접 로드를 지원하고, `run_knn_eval.sh --extract`로 오디오 입력부터 feature 추출·kNN 평가까지 1-command 파이프라인 실행이 가능하도록 확장함.
+- WavJEPA 오리지널 추론 경로(HEAR/HuggingFace 예제 및 JEPA 모듈 구조)를 기준으로 ckpt 로딩/추론 경로를 재검토해, `load_from_checkpoint` 우선 로딩과 `extract_audio -> feature_norms -> encoder` 기반 임베딩 추출 경로를 반영함.
