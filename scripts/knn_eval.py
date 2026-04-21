@@ -26,6 +26,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--features-dir", type=Path, required=True)
     p.add_argument("--splits", type=Path, required=True, help="CSV with columns: id,label,split[,task]")
     p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--task", type=str, default="", help="Evaluate only one task name")
+    p.add_argument("--results-csv", type=str, default="results.csv")
+    p.add_argument("--results-json", type=str, default="results.json")
     p.add_argument("--k", type=int, default=200)
     p.add_argument("--metric", type=str, default="cosine")
     p.add_argument("--weighting", type=str, default="distance", choices=["uniform", "distance"])
@@ -113,13 +116,18 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     records = load_split(args.splits)
+    if args.task:
+        records = [r for r in records if r.task == args.task]
+        if not records:
+            raise ValueError(f"no records found for task: {args.task}")
+
     x, valid_records = load_features(args.features_dir, records)
     tasks = sorted({r.task for r in valid_records})
 
     rows = [evaluate_task(x, valid_records, t, args.k, args.metric, args.weighting) for t in tasks]
     df = pd.DataFrame(rows)
-    csv_path = args.output_dir / "results.csv"
-    json_path = args.output_dir / "results.json"
+    csv_path = args.output_dir / args.results_csv
+    json_path = args.output_dir / args.results_json
 
     df.to_csv(csv_path, index=False)
 

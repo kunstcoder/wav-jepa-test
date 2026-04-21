@@ -38,8 +38,8 @@
   - [ ] SpeechCommands
   - [ ] GTZAN
 - [ ] Full run (전체 태스크)
-  - [ ] 실패 태스크 자동 재시도
-  - [ ] 결과 파일 자동 수집(csv/json)
+  - [x] 실패 태스크 자동 재시도
+  - [x] 결과 파일 자동 수집(csv/json)
 
 ## 5) 공정 비교 보정
 - [ ] Audio-JEPA와 설정 일치 항목 점검표 작성
@@ -81,3 +81,4 @@
 
 - `scripts/knn_eval.py`를 추가해 split CSV(`id,label,split[,task]`) 기반 실제 kNN 분류 및 task별 정확도 계산을 구현함.
 - `run_knn_eval.sh`를 placeholder 모드에서 Python 평가 실행 방식으로 전환함.
+- `run_knn_eval.sh`에 task별 실행/실패 재시도(`--retry-failed`) 로직을 추가하고, `scripts/collect_results.py`로 per-task 결과를 최종 `results.csv/json`으로 자동 수집하도록 확장함.
