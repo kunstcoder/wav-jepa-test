@@ -1,0 +1,40 @@
+# Python cache / virtual env
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Project artifacts (do not track)
+data/
+datasets/
+checkpoint/
+checkpoints/
+ckpt/
+models/
+weights/
+
+# Experiment outputs
+logs/
+outputs/
+results/
+runs/
+wandb/
+mlruns/
+
+# Temporary files
+*.log
+*.tmp
+*.bak
