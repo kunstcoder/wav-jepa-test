@@ -22,13 +22,13 @@
   - [x] seed, commit hash, 실행시간 저장
 
 ## 3) WavJEPA 임베딩 추출 어댑터 구현
-- [ ] WavJEPA inference wrapper 작성
-  - [ ] 입력 오디오 로딩/리샘플링
-  - [ ] 배치 처리/패딩 처리
-- [ ] X-ARES 호환 feature exporter 작성
+- [x] WavJEPA inference wrapper 작성
+  - [x] 입력 오디오 로딩/리샘플링
+  - [x] 배치 처리/패딩 처리
+- [x] X-ARES 호환 feature exporter 작성
   - [x] 파일명/메타데이터 스키마 맞춤
   - [x] dtype/shape 검증
-- [ ] 품질 검증 유틸 추가
+- [x] 품질 검증 유틸 추가
   - [x] NaN/Inf 검사
   - [x] 빈 임베딩 검사
 
@@ -82,3 +82,7 @@
 - `scripts/knn_eval.py`를 추가해 split CSV(`id,label,split[,task]`) 기반 실제 kNN 분류 및 task별 정확도 계산을 구현함.
 - `run_knn_eval.sh`를 placeholder 모드에서 Python 평가 실행 방식으로 전환함.
 - `run_knn_eval.sh`에 task별 실행/실패 재시도(`--retry-failed`) 로직을 추가하고, `scripts/collect_results.py`로 per-task 결과를 최종 `results.csv/json`으로 자동 수집하도록 확장함.
+
+- `scripts/extract_wavjepa_features.py`를 추가해 WavJEPA inference wrapper(오디오 로딩/리샘플링, 배치/패딩 처리)와 X-ARES 호환 feature exporter(`id.npy` + metadata CSV)를 구현함.
+- 추출 단계에서 임베딩 품질 검증(NaN/Inf, empty embedding, shape/dim 불일치)을 수행하도록 어댑터 검증 로직을 반영함.
+- 로컬 재현 실행용 문서 `README_wavjepa_adapter.md`를 추가해 임베딩 추출부터 kNN 평가까지 한 번에 실행 가능한 절차를 정리함.
