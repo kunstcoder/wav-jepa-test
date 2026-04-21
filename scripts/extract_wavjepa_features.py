@@ -15,7 +15,6 @@ from tqdm import tqdm
 
 try:
     import torch
-    import torch.nn.functional as F
 except Exception as exc:  # pragma: no cover
     raise RuntimeError("PyTorch is required for WavJEPA adapter. Install torch first.") from exc
 
@@ -35,8 +34,10 @@ class WavJEPAInferenceWrapper:
         device: str,
         module: str,
         class_name: str,
+        encoder_output: str,
     ) -> None:
         self.backend = backend
+        self.encoder_output = encoder_output
         self.device = torch.device(device)
 
         if backend == "torchscript":
@@ -49,36 +50,50 @@ class WavJEPAInferenceWrapper:
             mod = importlib.import_module(module)
             cls = getattr(mod, class_name)
             self.model = cls(model_path)
-        elif backend == "mock":
-            self.model = None
         else:
             raise ValueError(f"unsupported backend: {backend}")
 
-        if self.model is not None:
-            self.model.eval()
-            if hasattr(self.model, "to"):
-                self.model.to(self.device)
+        self.model.eval()
+        if hasattr(self.model, "to"):
+            self.model.to(self.device)
+
+    def _pick_from_dict(self, out: dict[str, Any]) -> torch.Tensor:
+        encoder_priority = {
+            "context": ("context_embeddings", "context_embedding", "context"),
+            "target": ("target_embeddings", "target_embedding", "target"),
+            "auto": (),
+        }
+
+        keys_to_try: tuple[str, ...] = encoder_priority[self.encoder_output] + (
+            "embeddings",
+            "embedding",
+            "x",
+            "features",
+        )
+
+        for key in keys_to_try:
+            if key in out and isinstance(out[key], torch.Tensor):
+                return out[key]
+
+        tensor_candidates = [v for v in out.values() if isinstance(v, torch.Tensor)]
+        if len(tensor_candidates) == 1:
+            return tensor_candidates[0]
+
+        available = sorted(out.keys())
+        raise KeyError(
+            "Could not choose embedding tensor from model output dict. "
+            f"encoder_output={self.encoder_output}, available_keys={available}"
+        )
 
     @torch.inference_mode()
     def encode(self, batch_audio: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
-        if self.backend == "mock":
-            x = batch_audio
-            mean = x.mean(dim=1, keepdim=True)
-            std = x.std(dim=1, keepdim=True)
-            mx = x.max(dim=1, keepdim=True).values
-            mn = x.min(dim=1, keepdim=True).values
-            return torch.cat([mean, std, mx, mn], dim=1)
-
         if self.backend == "python" and hasattr(self.model, "encode"):
             out = self.model.encode(batch_audio, lengths)
         else:
             out = self.model(batch_audio, lengths)
 
         if isinstance(out, dict):
-            for key in ("embeddings", "embedding", "x"):
-                if key in out:
-                    out = out[key]
-                    break
+            out = self._pick_from_dict(out)
         if isinstance(out, (tuple, list)):
             out = out[0]
         if not isinstance(out, torch.Tensor):
@@ -94,15 +109,23 @@ class WavJEPAInferenceWrapper:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Extract WavJEPA embeddings and export X-ARES-compatible features")
-    p.add_argument("--manifest", type=Path, required=True, help="CSV with columns: id,audio_path[,task]")
+
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--manifest", type=Path, help="CSV with columns: id,audio_path[,task]")
+    src.add_argument("--audio-dir", type=Path, help="Directory of audio files (loaded recursively)")
+
     p.add_argument("--output-dir", type=Path, required=True, help="Output feature directory")
     p.add_argument("--sample-rate", type=int, default=16000)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--num-workers", type=int, default=0, help="reserved for future use")
-    p.add_argument("--backend", type=str, default="torchscript", choices=["torchscript", "python", "mock"])
+    p.add_argument("--backend", type=str, default="torchscript", choices=["torchscript", "python"])
     p.add_argument("--model-path", type=str, default="")
     p.add_argument("--module", type=str, default="")
     p.add_argument("--class-name", type=str, default="")
+    p.add_argument("--encoder-output", type=str, default="context", choices=["context", "target", "auto"],
+                   help="Select encoder output key from dict outputs")
+    p.add_argument("--audio-exts", type=str, default=".wav,.flac,.mp3,.ogg,.m4a", help="comma-separated extensions")
+    p.add_argument("--task", type=str, default="default", help="task name when using --audio-dir")
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--metadata-name", type=str, default="features_manifest.csv")
     return p.parse_args()
@@ -126,6 +149,23 @@ def read_manifest(path: Path) -> list[Sample]:
                 )
             )
     return out
+
+
+def discover_audio_samples(audio_dir: Path, extensions: set[str], task: str) -> list[Sample]:
+    if not audio_dir.exists() or not audio_dir.is_dir():
+        raise ValueError(f"invalid --audio-dir: {audio_dir}")
+
+    samples: list[Sample] = []
+    for path in sorted(audio_dir.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in extensions:
+            continue
+        relative = path.relative_to(audio_dir)
+        sample_id = str(relative.with_suffix("")).replace("/", "__")
+        samples.append(Sample(sample_id=sample_id, audio_path=path, task=task))
+
+    if not samples:
+        raise ValueError(f"no audio files found in {audio_dir} (exts={sorted(extensions)})")
+    return samples
 
 
 def load_audio(path: Path, sample_rate: int) -> np.ndarray:
@@ -161,13 +201,19 @@ def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    samples = read_manifest(args.manifest)
+    if args.manifest is not None:
+        samples = read_manifest(args.manifest)
+    else:
+        exts = {ext.strip().lower() for ext in args.audio_exts.split(",") if ext.strip()}
+        samples = discover_audio_samples(args.audio_dir, exts, args.task)
+
     wrapper = WavJEPAInferenceWrapper(
         backend=args.backend,
         model_path=args.model_path,
         device=args.device,
         module=args.module,
         class_name=args.class_name,
+        encoder_output=args.encoder_output,
     )
 
     expected_dim: int | None = None
@@ -210,6 +256,7 @@ def main() -> None:
         "embedding_dim": expected_dim,
         "sample_rate": args.sample_rate,
         "backend": args.backend,
+        "encoder_output": args.encoder_output,
         "metadata_file": str(meta_path),
     }
     (args.output_dir / "export_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

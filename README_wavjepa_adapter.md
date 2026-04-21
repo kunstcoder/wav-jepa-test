@@ -70,14 +70,20 @@ python3 scripts/extract_wavjepa_features.py \
   --model-path /path/to/checkpoint.pt
 ```
 
-### C) Mock 백엔드 (파이프라인 검증용)
+### C) 폴더 입력 + recursive 로드
+manifest 없이 폴더를 직접 지정하면 하위 디렉터리를 재귀적으로 스캔해 오디오 파일을 로드합니다.
 
 ```bash
 python3 scripts/extract_wavjepa_features.py \
-  --manifest data/manifest.csv \
+  --audio-dir /data/audio \
   --output-dir artifacts/features \
-  --backend mock
+  --backend torchscript \
+  --model-path /path/to/wavjepa_encoder.ts \
+  --encoder-output context
 ```
+
+- `--audio-exts`로 확장자 목록을 지정할 수 있습니다(기본: `.wav,.flac,.mp3,.ogg,.m4a`).
+- `--task`로 폴더 입력 시 공통 task 값을 지정할 수 있습니다.
 
 ## 4. 추출 결과 확인
 
