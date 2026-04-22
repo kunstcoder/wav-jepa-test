@@ -92,10 +92,20 @@ class WavJEPAInferenceWrapper:
         suffix = Path(model_path).suffix.lower()
         if suffix in {".ts", ".torchscript"}:
             return "torchscript"
-        if suffix == ".safetensors" and module and class_name:
-            return "python-safetensors"
-        if suffix in {".ckpt", ".pt", ".pth"} and module and class_name:
-            return "python-ckpt"
+        if suffix == ".safetensors":
+            if module and class_name:
+                return "python-safetensors"
+            raise ValueError(
+                "Auto backend detection found a .safetensors file, but --module/--class-name are missing. "
+                "Set --backend=python-safetensors and provide both flags."
+            )
+        if suffix in {".ckpt", ".pt", ".pth"}:
+            if module and class_name:
+                return "python-ckpt"
+            raise ValueError(
+                "Auto backend detection found a checkpoint file, but --module/--class-name are missing. "
+                "Set --backend=python-ckpt and provide both flags."
+            )
         if module and class_name:
             return "python"
         return "torchscript"
