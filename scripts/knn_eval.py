@@ -5,12 +5,16 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
+import librosa
 import numpy as np
 import pandas as pd
+import torch
 from sklearn.metrics import accuracy_score
 from sklearn.neighbors import KNeighborsClassifier
+from tqdm import tqdm
+
+from extract_wavjepa_features import WavJEPAInferenceWrapper, collate_with_padding
 
 
 @dataclass
@@ -22,17 +26,19 @@ class Record:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run kNN evaluation from pre-extracted embeddings")
-    p.add_argument("--features-dir", type=Path, required=True)
-    p.add_argument("--splits", type=Path, required=True, help="CSV with columns: id,label,split[,task]")
-    p.add_argument("--output-dir", type=Path, required=True)
-    p.add_argument("--task", type=str, default="", help="Evaluate only one task name")
-    p.add_argument("--results-csv", type=str, default="results.csv")
-    p.add_argument("--results-json", type=str, default="results.json")
+    p = argparse.ArgumentParser(description="Run end-to-end WavJEPA -> kNN evaluation (in-memory)")
+    p.add_argument("--model-path", type=Path, required=True)
+    p.add_argument("--data-path", type=Path, required=True, help="Dataset root containing splits.csv and audio/")
+    p.add_argument("--encoder", type=str, required=True, choices=["context", "target", "auto"])
+    p.add_argument("--output-dir", type=Path, default=Path("artifacts/knn_eval"))
     p.add_argument("--k", type=int, default=200)
     p.add_argument("--metric", type=str, default="cosine")
     p.add_argument("--weighting", type=str, default="distance", choices=["uniform", "distance"])
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--sample-rate", type=int, default=16000)
+    p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--device", type=str, default="cpu")
+    p.add_argument("--audio-exts", type=str, default=".wav,.flac,.mp3,.ogg,.m4a")
     return p.parse_args()
 
 
@@ -52,40 +58,41 @@ def load_split(path: Path) -> list[Record]:
     ]
 
 
-def flatten_embedding(arr: np.ndarray) -> np.ndarray:
-    if arr.size == 0:
-        raise ValueError("empty embedding")
-    if not np.isfinite(arr).all():
-        raise ValueError("embedding contains NaN/Inf")
-    if arr.ndim == 0:
-        return arr.reshape(1)
-    if arr.ndim == 1:
-        return arr
-    return arr.mean(axis=0).reshape(-1)
+def load_audio(path: Path, sample_rate: int) -> np.ndarray:
+    wav, _ = librosa.load(path, sr=sample_rate, mono=True)
+    if wav.size == 0:
+        raise ValueError(f"empty audio: {path}")
+    return wav.astype(np.float32, copy=False)
 
 
-def load_features(features_dir: Path, records: Iterable[Record]) -> tuple[np.ndarray, list[Record]]:
-    vectors: list[np.ndarray] = []
-    valid_records: list[Record] = []
-
-    for rec in records:
-        fp = features_dir / f"{rec.sample_id}.npy"
-        if not fp.exists():
+def build_audio_index(audio_root: Path, extensions: set[str]) -> dict[str, Path]:
+    index: dict[str, Path] = {}
+    for path in sorted(audio_root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in extensions:
             continue
-        arr = np.load(fp)
-        vec = flatten_embedding(arr)
-        vectors.append(vec.astype(np.float32, copy=False))
-        valid_records.append(rec)
+        stem = path.stem
+        if stem not in index:
+            index[stem] = path
+    return index
 
-    if not vectors:
-        raise ValueError("no valid feature vectors found")
 
-    dim = vectors[0].shape[0]
-    for i, v in enumerate(vectors):
-        if v.shape[0] != dim:
-            raise ValueError(f"dimension mismatch at index {i}: {v.shape[0]} vs {dim}")
+def resolve_audio_path(sample_id: str, audio_root: Path, audio_index: dict[str, Path], extensions: set[str]) -> Path | None:
+    raw = audio_root / sample_id
+    if raw.is_file():
+        return raw
 
-    return np.stack(vectors), valid_records
+    sample_path = Path(sample_id)
+    if sample_path.suffix:
+        with_ext = audio_root / sample_path
+        if with_ext.is_file():
+            return with_ext
+    else:
+        for ext in extensions:
+            candidate = audio_root / f"{sample_id}{ext}"
+            if candidate.is_file():
+                return candidate
+
+    return audio_index.get(sample_path.stem)
 
 
 def evaluate_task(x: np.ndarray, recs: list[Record], task: str, k: int, metric: str, weighting: str) -> dict:
@@ -113,32 +120,81 @@ def evaluate_task(x: np.ndarray, recs: list[Record], task: str, k: int, metric: 
 def main() -> None:
     args = parse_args()
     np.random.seed(args.seed)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    torch.manual_seed(args.seed)
 
-    records = load_split(args.splits)
-    if args.task:
-        records = [r for r in records if r.task == args.task]
-        if not records:
-            raise ValueError(f"no records found for task: {args.task}")
+    splits_path = args.data_path / "splits.csv"
+    audio_root = args.data_path / "audio"
 
-    x, valid_records = load_features(args.features_dir, records)
+    if not args.model_path.exists():
+        raise FileNotFoundError(f"model file not found: {args.model_path}")
+    if not splits_path.exists():
+        raise FileNotFoundError(f"splits.csv not found: {splits_path}")
+    if not audio_root.exists() or not audio_root.is_dir():
+        raise FileNotFoundError(f"audio directory not found: {audio_root}")
+
+    records = load_split(splits_path)
+    extensions = {ext.strip().lower() for ext in args.audio_exts.split(",") if ext.strip()}
+    audio_index = build_audio_index(audio_root, extensions)
+
+    wrapper = WavJEPAInferenceWrapper(
+        backend="auto",
+        model_path=str(args.model_path),
+        device=args.device,
+        module="",
+        class_name="",
+        encoder_output=args.encoder,
+        hf_model_id="",
+        hf_filename="model.safetensors",
+    )
+
+    valid_records: list[Record] = []
+    features: list[np.ndarray] = []
+
+    for start in tqdm(range(0, len(records), args.batch_size), desc="encode"):
+        batch_records = records[start : start + args.batch_size]
+        batch_audio: list[np.ndarray] = []
+        batch_meta: list[Record] = []
+
+        for rec in batch_records:
+            audio_path = resolve_audio_path(rec.sample_id, audio_root, audio_index, extensions)
+            if audio_path is None:
+                continue
+            batch_audio.append(load_audio(audio_path, args.sample_rate))
+            batch_meta.append(rec)
+
+        if not batch_audio:
+            continue
+
+        batch, lengths = collate_with_padding(batch_audio)
+        batch = batch.to(wrapper.device)
+        lengths = lengths.to(wrapper.device)
+
+        emb = wrapper.encode(batch, lengths).detach().cpu().numpy().astype(np.float32, copy=False)
+        for i, rec in enumerate(batch_meta):
+            vec = emb[i].reshape(-1)
+            if not np.isfinite(vec).all() or vec.size == 0:
+                continue
+            valid_records.append(rec)
+            features.append(vec)
+
+    if not features:
+        raise ValueError("no valid embeddings generated; check data-path, splits.csv ids, and audio files")
+
+    x = np.stack(features)
     tasks = sorted({r.task for r in valid_records})
-
     rows = [evaluate_task(x, valid_records, t, args.k, args.metric, args.weighting) for t in tasks]
-    df = pd.DataFrame(rows)
-    csv_path = args.output_dir / args.results_csv
-    json_path = args.output_dir / args.results_json
 
-    df.to_csv(csv_path, index=False)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(args.output_dir / "results.csv", index=False)
 
-    macro = df["score"].dropna().mean() if (df["score"].notna().any()) else None
+    macro = np.mean([r["score"] for r in rows if r["score"] is not None]) if any(r["score"] is not None for r in rows) else None
     payload = {
         "num_records": len(valid_records),
         "num_tasks": len(tasks),
         "macro_average": None if macro is None else float(macro),
         "results": rows,
     }
-    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    (args.output_dir / "results.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":
