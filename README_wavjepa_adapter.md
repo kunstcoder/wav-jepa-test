@@ -19,6 +19,19 @@ python3 scripts/knn_eval.py \
   --encoder context
 ```
 
+### 공식 WavJEPA GitHub 학습 ckpt 추론 경로
+GitHub 학습 코드로 만든 `.ckpt`를 사용할 때는, 공식 repo를 클론한 경로를 `--source-root`로 넘기면
+패키지 설치 없이 클래스 자동 탐색 후 ckpt 로딩을 시도합니다.
+
+```bash
+python3 scripts/knn_eval.py \
+  --model-path /path/to/your.ckpt \
+  --backend python-ckpt \
+  --source-root /path/to/cloned/wavjepa \
+  --data-path <DATA_ROOT> \
+  --encoder context
+```
+
 ## 입력 규약
 `--data-path`는 아래 두 구조 중 하나를 가져야 합니다.
 

@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
         help="Model loading backend passed to WavJEPAInferenceWrapper",
     )
     p.add_argument("--hf-model-id", type=str, default="", help="HF repo id for wavjepa-hf backend")
+    p.add_argument("--source-root", type=str, default="", help="Path to cloned official WavJEPA GitHub source tree")
     p.add_argument("--module", type=str, default="",
                    help="Python module path. Optional when official wavjepa/sjepa package is installed.")
     p.add_argument("--class-name", type=str, default="",
@@ -205,6 +206,7 @@ def main() -> None:
         hf_model_id=args.hf_model_id,
         hf_filename="model.safetensors",
         sample_rate=args.sample_rate,
+        source_root=args.source_root,
     )
 
     valid_records: list[Record] = []
