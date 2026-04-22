@@ -6,6 +6,7 @@ import csv
 import importlib
 import inspect
 import json
+import pkgutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -53,18 +54,12 @@ class WavJEPAInferenceWrapper:
                 raise ValueError("--model-path is required when --backend=torchscript")
             self.model = torch.jit.load(model_path, map_location=self.device)
         elif self.backend == "python":
-            if not module or not class_name:
-                raise ValueError("--module and --class-name are required when --backend=python")
-            mod = importlib.import_module(module)
-            cls = getattr(mod, class_name)
+            cls = self._resolve_python_class(module, class_name)
             self.model = cls(model_path)
         elif self.backend == "python-ckpt":
             if not model_path:
                 raise ValueError("--model-path is required when --backend=python-ckpt")
-            if not module or not class_name:
-                raise ValueError("--module and --class-name are required when --backend=python-ckpt")
-            mod = importlib.import_module(module)
-            cls = getattr(mod, class_name)
+            cls = self._resolve_python_class(module, class_name)
             self.model = self._load_with_lightning(cls, model_path)
             if self.model is None:
                 self.model = self._build_python_model(cls, model_path)
@@ -72,10 +67,7 @@ class WavJEPAInferenceWrapper:
         elif self.backend == "python-safetensors":
             if not model_path:
                 raise ValueError("--model-path (or --hf-model-id) is required when --backend=python-safetensors")
-            if not module or not class_name:
-                raise ValueError("--module and --class-name are required when --backend=python-safetensors")
-            mod = importlib.import_module(module)
-            cls = getattr(mod, class_name)
+            cls = self._resolve_python_class(module, class_name)
             self.model = self._build_python_model(cls, model_path)
             self._load_safetensors_into_model(self.model, model_path)
         else:
@@ -93,22 +85,72 @@ class WavJEPAInferenceWrapper:
         if suffix in {".ts", ".torchscript"}:
             return "torchscript"
         if suffix == ".safetensors":
-            if module and class_name:
-                return "python-safetensors"
-            raise ValueError(
-                "Auto backend detection found a .safetensors file, but --module/--class-name are missing. "
-                "Set --backend=python-safetensors and provide both flags."
-            )
+            return "python-safetensors"
         if suffix in {".ckpt", ".pt", ".pth"}:
-            if module and class_name:
-                return "python-ckpt"
-            raise ValueError(
-                "Auto backend detection found a checkpoint file, but --module/--class-name are missing. "
-                "Set --backend=python-ckpt and provide both flags."
-            )
+            return "python-ckpt"
         if module and class_name:
             return "python"
         return "torchscript"
+
+    def _resolve_python_class(self, module: str, class_name: str) -> type:
+        if module and class_name:
+            mod = importlib.import_module(module)
+            return getattr(mod, class_name)
+
+        discovered = self._discover_wavjepa_class()
+        if discovered is not None:
+            return discovered
+
+        raise ValueError(
+            "Could not resolve model class automatically. "
+            "Pass --module/--class-name or install official WavJEPA code (package `wavjepa`/`sjepa`) "
+            "in the current Python environment."
+        )
+
+    @staticmethod
+    def _discover_wavjepa_class() -> type | None:
+        candidate_roots = ("wavjepa", "sjepa")
+        visited_modules: set[str] = set()
+        scored_classes: list[tuple[int, type]] = []
+
+        for root in candidate_roots:
+            try:
+                root_mod = importlib.import_module(root)
+            except Exception:
+                continue
+
+            modules = [root_mod]
+            pkg_path = getattr(root_mod, "__path__", None)
+            if pkg_path is not None:
+                for modinfo in pkgutil.walk_packages(pkg_path, prefix=f"{root}."):
+                    try:
+                        modules.append(importlib.import_module(modinfo.name))
+                    except Exception:
+                        continue
+
+            for mod in modules:
+                mod_name = getattr(mod, "__name__", "")
+                if not mod_name or mod_name in visited_modules:
+                    continue
+                visited_modules.add(mod_name)
+
+                for _, cls in inspect.getmembers(mod, inspect.isclass):
+                    if cls.__module__ != mod_name:
+                        continue
+                    if not issubclass(cls, torch.nn.Module):
+                        continue
+                    name = cls.__name__.lower()
+                    score = 0
+                    if "jepa" in name:
+                        score += 10
+                    if "wav" in name:
+                        score += 5
+                    scored_classes.append((score, cls))
+
+        if not scored_classes:
+            return None
+        scored_classes.sort(key=lambda item: item[0], reverse=True)
+        return scored_classes[0][1]
 
     @staticmethod
     def _resolve_model_path(model_path: str, hf_model_id: str, hf_filename: str) -> str:
@@ -308,8 +350,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model-path", type=str, default="")
     p.add_argument("--hf-model-id", type=str, default="", help="Hugging Face model repo id")
     p.add_argument("--hf-filename", type=str, default="model.safetensors", help="Filename in HF repo")
-    p.add_argument("--module", type=str, default="")
-    p.add_argument("--class-name", type=str, default="")
+    p.add_argument("--module", type=str, default="",
+                   help="Python module for model class. Optional when official wavjepa/sjepa package is installed.")
+    p.add_argument("--class-name", type=str, default="",
+                   help="Model class name. Optional when official wavjepa/sjepa package is installed.")
     p.add_argument("--encoder-output", type=str, default="context", choices=["context", "target", "auto"],
                    help="Select encoder output key from dict outputs")
     p.add_argument("--audio-exts", type=str, default=".wav,.flac,.mp3,.ogg,.m4a", help="comma-separated extensions")
