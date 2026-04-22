@@ -28,6 +28,15 @@ class Record:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run end-to-end WavJEPA -> kNN evaluation (in-memory)")
     p.add_argument("--model-path", type=Path, required=True)
+    p.add_argument(
+        "--backend",
+        type=str,
+        default="auto",
+        choices=["auto", "torchscript", "python", "python-ckpt", "python-safetensors"],
+        help="Model loading backend passed to WavJEPAInferenceWrapper",
+    )
+    p.add_argument("--module", type=str, default="", help="Python module path for python/python-ckpt/python-safetensors")
+    p.add_argument("--class-name", type=str, default="", help="Model class name for python/python-ckpt/python-safetensors")
     p.add_argument("--data-path", type=Path, required=True, help="Dataset root containing splits.csv and audio/")
     p.add_argument("--encoder", type=str, required=True, choices=["context", "target", "auto"])
     p.add_argument("--output-dir", type=Path, default=Path("artifacts/knn_eval"))
@@ -184,11 +193,11 @@ def main() -> None:
     audio_index = build_audio_index(audio_root, extensions)
 
     wrapper = WavJEPAInferenceWrapper(
-        backend="auto",
+        backend=args.backend,
         model_path=str(args.model_path),
         device=args.device,
-        module="",
-        class_name="",
+        module=args.module,
+        class_name=args.class_name,
         encoder_output=args.encoder,
         hf_model_id="",
         hf_filename="model.safetensors",
