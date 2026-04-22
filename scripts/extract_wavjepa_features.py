@@ -39,10 +39,13 @@ class WavJEPAInferenceWrapper:
         encoder_output: str,
         hf_model_id: str,
         hf_filename: str,
+        sample_rate: int,
     ) -> None:
-        self.backend = self._resolve_backend(backend, model_path, module, class_name)
+        self.backend = self._resolve_backend(backend, model_path, module, class_name, hf_model_id)
         self.encoder_output = encoder_output
         self.device = torch.device(device)
+        self.sample_rate = sample_rate
+        self.feature_extractor = None
         model_path = self._resolve_model_path(
             model_path=model_path,
             hf_model_id=hf_model_id,
@@ -70,6 +73,11 @@ class WavJEPAInferenceWrapper:
             cls = self._resolve_python_class(module, class_name)
             self.model = self._build_python_model(cls, model_path)
             self._load_safetensors_into_model(self.model, model_path)
+        elif self.backend == "wavjepa-hf":
+            repo_or_path = hf_model_id or model_path
+            if not repo_or_path:
+                raise ValueError("--hf-model-id (or --model-path as local hf dir) is required when --backend=wavjepa-hf")
+            self.model, self.feature_extractor = self._load_hf_wavjepa(repo_or_path, self.device)
         else:
             raise ValueError(f"unsupported backend: {self.backend}")
 
@@ -78,9 +86,11 @@ class WavJEPAInferenceWrapper:
             self.model.to(self.device)
 
     @staticmethod
-    def _resolve_backend(backend: str, model_path: str, module: str, class_name: str) -> str:
+    def _resolve_backend(backend: str, model_path: str, module: str, class_name: str, hf_model_id: str) -> str:
         if backend != "auto":
             return backend
+        if hf_model_id and not model_path:
+            return "wavjepa-hf"
         suffix = Path(model_path).suffix.lower()
         if suffix in {".ts", ".torchscript"}:
             return "torchscript"
@@ -91,6 +101,19 @@ class WavJEPAInferenceWrapper:
         if module and class_name:
             return "python"
         return "torchscript"
+
+    @staticmethod
+    def _load_hf_wavjepa(repo_or_path: str, device: torch.device) -> tuple[Any, Any]:
+        try:
+            from transformers import AutoFeatureExtractor, AutoModel
+        except Exception as exc:
+            raise RuntimeError(
+                "WavJEPA HF backend requires `transformers`. Install it first."
+            ) from exc
+
+        model = AutoModel.from_pretrained(repo_or_path, trust_remote_code=True).to(device)
+        extractor = AutoFeatureExtractor.from_pretrained(repo_or_path, trust_remote_code=True)
+        return model, extractor
 
     def _resolve_python_class(self, module: str, class_name: str) -> type:
         if module and class_name:
@@ -279,7 +302,19 @@ class WavJEPAInferenceWrapper:
 
     @torch.inference_mode()
     def encode(self, batch_audio: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
-        if self.backend == "python-ckpt" and hasattr(self.model, "extract_audio") and hasattr(self.model, "feature_norms"):
+        if self.backend == "wavjepa-hf":
+            if self.feature_extractor is None:
+                raise RuntimeError("feature_extractor is not initialized for wavjepa-hf backend")
+
+            extracted = self.feature_extractor(
+                batch_audio.detach().cpu().numpy(),
+                sampling_rate=self.sample_rate,
+                return_tensors="pt",
+                padding=True,
+            )
+            input_values = extracted["input_values"].to(self.device)
+            out = self.model(input_values)
+        elif self.backend == "python-ckpt" and hasattr(self.model, "extract_audio") and hasattr(self.model, "feature_norms"):
             local = self.model.extract_audio(batch_audio)
             local = self.model.feature_norms(local)
             if hasattr(self.model, "post_extraction_mapper") and self.model.post_extraction_mapper is not None:
@@ -345,7 +380,7 @@ def parse_args() -> argparse.Namespace:
         "--backend",
         type=str,
         default="auto",
-        choices=["auto", "torchscript", "python", "python-ckpt", "python-safetensors"],
+        choices=["auto", "torchscript", "python", "python-ckpt", "python-safetensors", "wavjepa-hf"],
     )
     p.add_argument("--model-path", type=str, default="")
     p.add_argument("--hf-model-id", type=str, default="", help="Hugging Face model repo id")
@@ -425,6 +460,7 @@ def main() -> None:
         encoder_output=args.encoder_output,
         hf_model_id=args.hf_model_id,
         hf_filename=args.hf_filename,
+        sample_rate=args.sample_rate,
     )
 
     expected_dim: int | None = None

@@ -7,6 +7,18 @@
 ./run_knn_eval.sh --model-path <MODEL_FILE> --data-path <DATA_ROOT> --encoder <context|target|auto>
 ```
 
+### 공식 WavJEPA(Hugging Face remote code) 추론 경로
+패키지 설치 없이 공식 코드 기반 추론을 사용하려면 `scripts/knn_eval.py`를 직접 실행해
+`--backend wavjepa-hf`와 `--hf-model-id`를 지정하세요.
+
+```bash
+python3 scripts/knn_eval.py \
+  --backend wavjepa-hf \
+  --hf-model-id labhamlet/wavjepa-base \
+  --data-path <DATA_ROOT> \
+  --encoder context
+```
+
 ## 입력 규약
 `--data-path`는 아래 두 구조 중 하나를 가져야 합니다.
 

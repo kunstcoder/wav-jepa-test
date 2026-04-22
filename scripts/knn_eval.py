@@ -27,14 +27,15 @@ class Record:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run end-to-end WavJEPA -> kNN evaluation (in-memory)")
-    p.add_argument("--model-path", type=Path, required=True)
+    p.add_argument("--model-path", type=str, default="", help="Model file path (not required for wavjepa-hf when --hf-model-id is set)")
     p.add_argument(
         "--backend",
         type=str,
         default="auto",
-        choices=["auto", "torchscript", "python", "python-ckpt", "python-safetensors"],
+        choices=["auto", "torchscript", "python", "python-ckpt", "python-safetensors", "wavjepa-hf"],
         help="Model loading backend passed to WavJEPAInferenceWrapper",
     )
+    p.add_argument("--hf-model-id", type=str, default="", help="HF repo id for wavjepa-hf backend")
     p.add_argument("--module", type=str, default="",
                    help="Python module path. Optional when official wavjepa/sjepa package is installed.")
     p.add_argument("--class-name", type=str, default="",
@@ -178,7 +179,7 @@ def main() -> None:
     if not audio_root.exists() or not audio_root.is_dir():
         audio_root = args.data_path
 
-    if not args.model_path.exists():
+    if args.backend != "wavjepa-hf" and (not args.model_path or not Path(args.model_path).exists()):
         raise FileNotFoundError(f"model file not found: {args.model_path}")
     if not audio_root.exists() or not audio_root.is_dir():
         raise FileNotFoundError(f"audio/data directory not found: {audio_root}")
@@ -196,13 +197,14 @@ def main() -> None:
 
     wrapper = WavJEPAInferenceWrapper(
         backend=args.backend,
-        model_path=str(args.model_path),
+        model_path=args.model_path,
         device=args.device,
         module=args.module,
         class_name=args.class_name,
         encoder_output=args.encoder,
-        hf_model_id="",
+        hf_model_id=args.hf_model_id,
         hf_filename="model.safetensors",
+        sample_rate=args.sample_rate,
     )
 
     valid_records: list[Record] = []
