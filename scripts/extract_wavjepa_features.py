@@ -36,10 +36,17 @@ class WavJEPAInferenceWrapper:
         module: str,
         class_name: str,
         encoder_output: str,
+        hf_model_id: str,
+        hf_filename: str,
     ) -> None:
         self.backend = self._resolve_backend(backend, model_path, module, class_name)
         self.encoder_output = encoder_output
         self.device = torch.device(device)
+        model_path = self._resolve_model_path(
+            model_path=model_path,
+            hf_model_id=hf_model_id,
+            hf_filename=hf_filename,
+        )
 
         if self.backend == "torchscript":
             if not model_path:
@@ -62,6 +69,15 @@ class WavJEPAInferenceWrapper:
             if self.model is None:
                 self.model = self._build_python_model(cls, model_path)
                 self._load_checkpoint_into_model(self.model, model_path)
+        elif self.backend == "python-safetensors":
+            if not model_path:
+                raise ValueError("--model-path (or --hf-model-id) is required when --backend=python-safetensors")
+            if not module or not class_name:
+                raise ValueError("--module and --class-name are required when --backend=python-safetensors")
+            mod = importlib.import_module(module)
+            cls = getattr(mod, class_name)
+            self.model = self._build_python_model(cls, model_path)
+            self._load_safetensors_into_model(self.model, model_path)
         else:
             raise ValueError(f"unsupported backend: {self.backend}")
 
@@ -76,11 +92,29 @@ class WavJEPAInferenceWrapper:
         suffix = Path(model_path).suffix.lower()
         if suffix in {".ts", ".torchscript"}:
             return "torchscript"
+        if suffix == ".safetensors" and module and class_name:
+            return "python-safetensors"
         if suffix in {".ckpt", ".pt", ".pth"} and module and class_name:
             return "python-ckpt"
         if module and class_name:
             return "python"
         return "torchscript"
+
+    @staticmethod
+    def _resolve_model_path(model_path: str, hf_model_id: str, hf_filename: str) -> str:
+        if model_path:
+            return model_path
+        if not hf_model_id:
+            return model_path
+        filename = hf_filename or "model.safetensors"
+        try:
+            from huggingface_hub import hf_hub_download
+        except Exception as exc:
+            raise RuntimeError(
+                "Downloading from Hugging Face requires `huggingface_hub`. "
+                "Install it first or pass --model-path with a local file."
+            ) from exc
+        return hf_hub_download(repo_id=hf_model_id, filename=filename)
 
     @staticmethod
     def _build_python_model(cls: type, model_path: str) -> Any:
@@ -134,6 +168,30 @@ class WavJEPAInferenceWrapper:
         if len(missing_retry) > len(missing) and len(unexpected_retry) >= len(unexpected):
             raise RuntimeError(
                 "checkpoint load failed: excessive missing keys after load_state_dict. "
+                f"missing={len(missing)}, unexpected={len(unexpected)}"
+            )
+
+    def _load_safetensors_into_model(self, model: Any, model_path: str) -> None:
+        try:
+            from safetensors.torch import load_file
+        except Exception as exc:
+            raise RuntimeError(
+                "Loading .safetensors requires `safetensors`. Install it first."
+            ) from exc
+
+        state_dict = load_file(model_path, device=str(self.device))
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if len(missing) == 0:
+            return
+        strip_prefixes = ("model.", "module.", "net.", "backbone.")
+        stripped_state = {
+            next((k[len(p):] for p in strip_prefixes if k.startswith(p)), k): v
+            for k, v in state_dict.items()
+        }
+        missing_retry, unexpected_retry = model.load_state_dict(stripped_state, strict=False)
+        if len(missing_retry) > len(missing) and len(unexpected_retry) >= len(unexpected):
+            raise RuntimeError(
+                "safetensors load failed: excessive missing keys after load_state_dict. "
                 f"missing={len(missing)}, unexpected={len(unexpected)}"
             )
 
@@ -225,10 +283,7 @@ class WavJEPAInferenceWrapper:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Extract WavJEPA embeddings and export X-ARES-compatible features")
-
-    src = p.add_mutually_exclusive_group(required=True)
-    src.add_argument("--manifest", type=Path, help="CSV with columns: id,audio_path[,task]")
-    src.add_argument("--audio-dir", type=Path, help="Directory of audio files (loaded recursively)")
+    p.add_argument("--audio-dir", type=Path, required=True, help="Directory of audio files (loaded recursively)")
 
     p.add_argument("--output-dir", type=Path, required=True, help="Output feature directory")
     p.add_argument("--sample-rate", type=int, default=16000)
@@ -238,9 +293,11 @@ def parse_args() -> argparse.Namespace:
         "--backend",
         type=str,
         default="auto",
-        choices=["auto", "torchscript", "python", "python-ckpt"],
+        choices=["auto", "torchscript", "python", "python-ckpt", "python-safetensors"],
     )
     p.add_argument("--model-path", type=str, default="")
+    p.add_argument("--hf-model-id", type=str, default="", help="Hugging Face model repo id")
+    p.add_argument("--hf-filename", type=str, default="model.safetensors", help="Filename in HF repo")
     p.add_argument("--module", type=str, default="")
     p.add_argument("--class-name", type=str, default="")
     p.add_argument("--encoder-output", type=str, default="context", choices=["context", "target", "auto"],
@@ -250,26 +307,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--metadata-name", type=str, default="features_manifest.csv")
     return p.parse_args()
-
-
-def read_manifest(path: Path) -> list[Sample]:
-    with path.open("r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        required = {"id", "audio_path"}
-        missing = required - set(reader.fieldnames or [])
-        if missing:
-            raise ValueError(f"manifest missing columns: {sorted(missing)}")
-
-        out: list[Sample] = []
-        for row in reader:
-            out.append(
-                Sample(
-                    sample_id=str(row["id"]),
-                    audio_path=Path(str(row["audio_path"])),
-                    task=str(row.get("task", "default")),
-                )
-            )
-    return out
 
 
 def discover_audio_samples(audio_dir: Path, extensions: set[str], task: str) -> list[Sample]:
@@ -322,11 +359,8 @@ def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.manifest is not None:
-        samples = read_manifest(args.manifest)
-    else:
-        exts = {ext.strip().lower() for ext in args.audio_exts.split(",") if ext.strip()}
-        samples = discover_audio_samples(args.audio_dir, exts, args.task)
+    exts = {ext.strip().lower() for ext in args.audio_exts.split(",") if ext.strip()}
+    samples = discover_audio_samples(args.audio_dir, exts, args.task)
 
     wrapper = WavJEPAInferenceWrapper(
         backend=args.backend,
@@ -335,6 +369,8 @@ def main() -> None:
         module=args.module,
         class_name=args.class_name,
         encoder_output=args.encoder_output,
+        hf_model_id=args.hf_model_id,
+        hf_filename=args.hf_filename,
     )
 
     expected_dim: int | None = None
