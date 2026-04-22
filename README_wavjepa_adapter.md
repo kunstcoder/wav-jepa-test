@@ -13,20 +13,8 @@ pip install -r requirements.txt
 
 ## 2. 입력 파일 준비
 
-### 2-1. 임베딩 추출용 manifest CSV
-아래 컬럼을 가진 CSV를 준비합니다.
-
-- `id` (필수): 샘플 식별자
-- `audio_path` (필수): 오디오 파일 경로
-- `task` (선택): 태스크 이름 (없으면 `default`)
-
-예시(`data/manifest.csv`):
-
-```csv
-id,audio_path,task
-esc_0001,/data/audio/esc_0001.wav,ESC-50
-sc_1203,/data/audio/sc_1203.wav,SpeechCommands
-```
+### 2-1. 오디오 폴더
+오디오 루트 폴더를 준비합니다. 스크립트가 하위 디렉터리를 재귀적으로 탐색합니다.
 
 ### 2-2. kNN split CSV
 아래 컬럼을 가진 split CSV를 준비합니다.
@@ -48,7 +36,7 @@ esc_0002,cat,test,ESC-50
 
 ```bash
 python3 scripts/extract_wavjepa_features.py \
-  --manifest data/manifest.csv \
+  --audio-dir /data/audio \
   --output-dir artifacts/features \
   --backend torchscript \
   --model-path /path/to/wavjepa_encoder.ts \
@@ -62,7 +50,7 @@ python3 scripts/extract_wavjepa_features.py \
 
 ```bash
 python3 scripts/extract_wavjepa_features.py \
-  --manifest data/manifest.csv \
+  --audio-dir /data/audio \
   --output-dir artifacts/features \
   --backend python \
   --module my_models.wavjepa_adapter \
@@ -75,7 +63,7 @@ python3 scripts/extract_wavjepa_features.py \
 
 ```bash
 python3 scripts/extract_wavjepa_features.py \
-  --manifest data/manifest.csv \
+  --audio-dir /data/audio \
   --output-dir artifacts/features \
   --backend python-ckpt \
   --module my_models.wavjepa_adapter \
@@ -83,15 +71,18 @@ python3 scripts/extract_wavjepa_features.py \
   --model-path /path/to/model.ckpt
 ```
 
-### C) 폴더 입력 + recursive 로드
-manifest 없이 폴더를 직접 지정하면 하위 디렉터리를 재귀적으로 스캔해 오디오 파일을 로드합니다.
+### C) Hugging Face safetensors 사용
+Hugging Face repo에서 safetensors를 직접 받아 로드할 수 있습니다.
 
 ```bash
 python3 scripts/extract_wavjepa_features.py \
   --audio-dir /data/audio \
   --output-dir artifacts/features \
-  --backend torchscript \
-  --model-path /path/to/wavjepa_encoder.ts \
+  --backend python-safetensors \
+  --hf-model-id org_or_user/model_repo \
+  --hf-filename model.safetensors \
+  --module my_models.wavjepa_adapter \
+  --class-name MyWavJEPAEncoder \
   --encoder-output context
 ```
 
@@ -118,7 +109,7 @@ python3 scripts/extract_wavjepa_features.py \
 ```bash
 ./run_knn_eval.sh \
   --extract \
-  --manifest data/manifest.csv \
+  --audio-dir /data/audio \
   --splits data/splits.csv \
   --output-dir artifacts/e2e \
   --features-dir artifacts/e2e/features \

@@ -16,11 +16,12 @@ Required:
 
 Extraction mode:
   --extract             Run feature extraction before kNN
-  --manifest PATH       CSV for extraction (id,audio_path[,task])
   --audio-dir PATH      Audio directory for extraction (recursive)
   --features-dir PATH   Input feature dir (pre-extracted mode) or extraction output dir
-  --backend NAME        auto|torchscript|python|python-ckpt (default: auto)
-  --model-path PATH     Model/ckpt path for extractor
+  --backend NAME        auto|torchscript|python|python-ckpt|python-safetensors (default: auto)
+  --model-path PATH     Local model/ckpt/safetensors path for extractor
+  --hf-model-id NAME    Hugging Face repo id (optional, with --hf-filename)
+  --hf-filename NAME    Hugging Face model filename (default: model.safetensors)
   --module NAME         Python module path for python/python-ckpt backend
   --class-name NAME     Python class name for python/python-ckpt backend
   --encoder-output NAME context|target|auto (default: context)
@@ -46,10 +47,11 @@ FEATURES_DIR=""
 SPLITS=""
 OUTPUT_DIR=""
 DO_EXTRACT=0
-MANIFEST=""
 AUDIO_DIR=""
 BACKEND="auto"
 MODEL_PATH=""
+HF_MODEL_ID=""
+HF_FILENAME="model.safetensors"
 MODULE_NAME=""
 CLASS_NAME=""
 ENCODER_OUTPUT="context"
@@ -69,13 +71,14 @@ DRY_RUN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --extract) DO_EXTRACT=1; shift ;;
-    --manifest) MANIFEST="$2"; shift 2 ;;
     --audio-dir) AUDIO_DIR="$2"; shift 2 ;;
     --features-dir) FEATURES_DIR="$2"; shift 2 ;;
     --splits) SPLITS="$2"; shift 2 ;;
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
     --backend) BACKEND="$2"; shift 2 ;;
     --model-path) MODEL_PATH="$2"; shift 2 ;;
+    --hf-model-id) HF_MODEL_ID="$2"; shift 2 ;;
+    --hf-filename) HF_FILENAME="$2"; shift 2 ;;
     --module) MODULE_NAME="$2"; shift 2 ;;
     --class-name) CLASS_NAME="$2"; shift 2 ;;
     --encoder-output) ENCODER_OUTPUT="$2"; shift 2 ;;
@@ -106,12 +109,8 @@ if [[ "$DO_EXTRACT" -eq 1 ]]; then
   if [[ -z "$FEATURES_DIR" ]]; then
     FEATURES_DIR="$OUTPUT_DIR/features"
   fi
-  if [[ -z "$MANIFEST" && -z "$AUDIO_DIR" ]]; then
-    echo "[ERROR] extraction mode requires --manifest or --audio-dir"
-    exit 2
-  fi
-  if [[ -n "$MANIFEST" && -n "$AUDIO_DIR" ]]; then
-    echo "[ERROR] use only one of --manifest or --audio-dir"
+  if [[ -z "$AUDIO_DIR" ]]; then
+    echo "[ERROR] extraction mode requires --audio-dir"
     exit 2
   fi
 fi
@@ -130,10 +129,11 @@ cat > "$RUN_LOG" <<JSON
   "splits": "${SPLITS}",
   "extract": {
     "enabled": $DO_EXTRACT,
-    "manifest": "${MANIFEST}",
     "audio_dir": "${AUDIO_DIR}",
     "backend": "${BACKEND}",
     "model_path": "${MODEL_PATH}",
+    "hf_model_id": "${HF_MODEL_ID}",
+    "hf_filename": "${HF_FILENAME}",
     "module": "${MODULE_NAME}",
     "class_name": "${CLASS_NAME}",
     "encoder_output": "${ENCODER_OUTPUT}",
@@ -157,14 +157,16 @@ echo "[INFO] validating inputs..."
 [[ -f "$SPLITS" ]] || { echo "[ERROR] split file not found: $SPLITS"; exit 1; }
 [[ "$RETRY_FAILED" =~ ^[0-9]+$ ]] || { echo "[ERROR] --retry-failed must be non-negative int"; exit 2; }
 if [[ "$DO_EXTRACT" -eq 1 ]]; then
-  if [[ -n "$MANIFEST" ]]; then
-    [[ -f "$MANIFEST" ]] || { echo "[ERROR] manifest file not found: $MANIFEST"; exit 1; }
-  fi
   if [[ -n "$AUDIO_DIR" ]]; then
     [[ -d "$AUDIO_DIR" ]] || { echo "[ERROR] audio directory not found: $AUDIO_DIR"; exit 1; }
   fi
-  [[ -n "$MODEL_PATH" ]] || { echo "[ERROR] extraction mode requires --model-path"; exit 2; }
-  [[ -f "$MODEL_PATH" ]] || { echo "[ERROR] model path not found: $MODEL_PATH"; exit 1; }
+  if [[ -z "$MODEL_PATH" && -z "$HF_MODEL_ID" ]]; then
+    echo "[ERROR] extraction mode requires --model-path or --hf-model-id"
+    exit 2
+  fi
+  if [[ -n "$MODEL_PATH" ]]; then
+    [[ -f "$MODEL_PATH" ]] || { echo "[ERROR] model path not found: $MODEL_PATH"; exit 1; }
+  fi
 else
   [[ -d "$FEATURES_DIR" ]] || { echo "[ERROR] features directory not found: $FEATURES_DIR"; exit 1; }
 fi
@@ -181,6 +183,8 @@ if [[ "$DO_EXTRACT" -eq 1 ]]; then
     --output-dir "$FEATURES_DIR"
     --backend "$BACKEND"
     --model-path "$MODEL_PATH"
+    --hf-model-id "$HF_MODEL_ID"
+    --hf-filename "$HF_FILENAME"
     --encoder-output "$ENCODER_OUTPUT"
     --sample-rate "$SAMPLE_RATE"
     --batch-size "$BATCH_SIZE"
@@ -193,11 +197,7 @@ if [[ "$DO_EXTRACT" -eq 1 ]]; then
   if [[ -n "$CLASS_NAME" ]]; then
     EXTRACT_CMD+=(--class-name "$CLASS_NAME")
   fi
-  if [[ -n "$MANIFEST" ]]; then
-    EXTRACT_CMD+=(--manifest "$MANIFEST")
-  else
-    EXTRACT_CMD+=(--audio-dir "$AUDIO_DIR" --task "$EXTRACT_TASK")
-  fi
+  EXTRACT_CMD+=(--audio-dir "$AUDIO_DIR" --task "$EXTRACT_TASK")
   echo "[INFO] running extraction..."
   "${EXTRACT_CMD[@]}"
 fi
