@@ -35,8 +35,10 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "torchscript", "python", "python-ckpt", "python-safetensors"],
         help="Model loading backend passed to WavJEPAInferenceWrapper",
     )
-    p.add_argument("--module", type=str, default="", help="Python module path for python/python-ckpt/python-safetensors")
-    p.add_argument("--class-name", type=str, default="", help="Model class name for python/python-ckpt/python-safetensors")
+    p.add_argument("--module", type=str, default="",
+                   help="Python module path. Optional when official wavjepa/sjepa package is installed.")
+    p.add_argument("--class-name", type=str, default="",
+                   help="Model class name. Optional when official wavjepa/sjepa package is installed.")
     p.add_argument("--data-path", type=Path, required=True, help="Dataset root containing splits.csv and audio/")
     p.add_argument("--encoder", type=str, required=True, choices=["context", "target", "auto"])
     p.add_argument("--output-dir", type=Path, default=Path("artifacts/knn_eval"))
