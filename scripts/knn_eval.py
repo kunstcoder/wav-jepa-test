@@ -58,6 +58,46 @@ def load_split(path: Path) -> list[Record]:
     ]
 
 
+def load_split_from_dirs(data_path: Path, audio_root: Path, extensions: set[str]) -> list[Record]:
+    records: list[Record] = []
+    for split in ("train", "test"):
+        # Support both <data>/audio/train and <data>/train layouts.
+        candidates = [audio_root / split, data_path / split]
+        seen: set[Path] = set()
+        split_dirs: list[Path] = []
+        for c in candidates:
+            if c not in seen and c.exists() and c.is_dir():
+                split_dirs.append(c)
+                seen.add(c)
+
+        for split_dir in split_dirs:
+            for wav in sorted(split_dir.rglob("*")):
+                if not wav.is_file() or wav.suffix.lower() not in extensions:
+                    continue
+
+                meta = wav.with_suffix(".json")
+                label: str | None = None
+                if meta.exists() and meta.is_file():
+                    try:
+                        obj = json.loads(meta.read_text(encoding="utf-8"))
+                        raw = obj.get("labels", obj.get("label"))
+                        if raw is not None:
+                            label = str(raw).strip()
+                    except (json.JSONDecodeError, OSError):
+                        label = None
+
+                if not label:
+                    # Fallback for class-folder layouts.
+                    if wav.parent != split_dir:
+                        label = wav.parent.name
+                    else:
+                        continue
+
+                sample_id = str(wav.relative_to(audio_root))
+                records.append(Record(sample_id=sample_id, label=label, split=split, task="default"))
+    return records
+
+
 def load_audio(path: Path, sample_rate: int) -> np.ndarray:
     wav, _ = librosa.load(path, sr=sample_rate, mono=True)
     if wav.size == 0:
@@ -124,16 +164,23 @@ def main() -> None:
 
     splits_path = args.data_path / "splits.csv"
     audio_root = args.data_path / "audio"
+    if not audio_root.exists() or not audio_root.is_dir():
+        audio_root = args.data_path
 
     if not args.model_path.exists():
         raise FileNotFoundError(f"model file not found: {args.model_path}")
-    if not splits_path.exists():
-        raise FileNotFoundError(f"splits.csv not found: {splits_path}")
     if not audio_root.exists() or not audio_root.is_dir():
-        raise FileNotFoundError(f"audio directory not found: {audio_root}")
+        raise FileNotFoundError(f"audio/data directory not found: {audio_root}")
 
-    records = load_split(splits_path)
     extensions = {ext.strip().lower() for ext in args.audio_exts.split(",") if ext.strip()}
+    if splits_path.exists():
+        records = load_split(splits_path)
+    else:
+        records = load_split_from_dirs(args.data_path, audio_root, extensions)
+        if not records:
+            raise FileNotFoundError(
+                f"splits.csv not found and no usable records discovered from {args.data_path}/(train|test)"
+            )
     audio_index = build_audio_index(audio_root, extensions)
 
     wrapper = WavJEPAInferenceWrapper(
