@@ -9,8 +9,8 @@ Usage:
 Required arguments (only 3):
   --model-path PATH    WavJEPA model file path (.ts/.torchscript recommended)
   --data-path PATH     Dataset root containing:
-                       - splits.csv
-                       - audio/ (recursive audio files)
+                       - [Option A] splits.csv + audio/ (recursive audio files)
+                       - [Option B] train/ and test/ (wav + optional same-name json label)
   --encoder NAME       context | target | auto
 
 Defaults (fixed sane values):
@@ -52,8 +52,6 @@ done
 
 [[ -f "$MODEL_PATH" ]] || { echo "[ERROR] model file not found: $MODEL_PATH"; exit 1; }
 [[ -d "$DATA_PATH" ]] || { echo "[ERROR] data path not found: $DATA_PATH"; exit 1; }
-[[ -f "$DATA_PATH/splits.csv" ]] || { echo "[ERROR] splits.csv not found: $DATA_PATH/splits.csv"; exit 1; }
-[[ -d "$DATA_PATH/audio" ]] || { echo "[ERROR] audio dir not found: $DATA_PATH/audio"; exit 1; }
 
 mkdir -p "$OUTPUT_DIR"
 START_TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"

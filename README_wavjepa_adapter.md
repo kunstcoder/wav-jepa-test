@@ -8,13 +8,20 @@
 ```
 
 ## 입력 규약
-`--data-path`는 아래 구조를 가져야 합니다.
+`--data-path`는 아래 두 구조 중 하나를 가져야 합니다.
 
 ```text
 <DATA_ROOT>/
-  splits.csv
-  audio/
-    ... (재귀 탐색)
+  [옵션 A: CSV 기반]
+    splits.csv
+    audio/
+      ... (재귀 탐색)
+
+  [옵션 B: 폴더 기반]
+    train/
+      *.wav (+ optional same-name *.json with "labels" or "label")
+    test/
+      *.wav (+ optional same-name *.json with "labels" or "label")
 ```
 
 ### `splits.csv` 필수 컬럼
@@ -30,6 +37,9 @@ esc_0002,cat,test,ESC-50
 ```
 
 `id`는 오디오 파일 stem(확장자 제외 이름)과 매칭됩니다.
+
+> `splits.csv`가 없으면 코드가 `train/`, `test/`를 자동 스캔합니다.  
+> 이때 라벨은 우선 같은 이름의 `.json`(`labels` 또는 `label`)에서 읽고, 없으면 하위 폴더명을 라벨로 사용합니다.
 
 ## 출력
 기본 출력 경로: `artifacts/knn_eval`
