@@ -7,6 +7,7 @@ import importlib
 import inspect
 import json
 import pkgutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,11 +41,13 @@ class WavJEPAInferenceWrapper:
         hf_model_id: str,
         hf_filename: str,
         sample_rate: int,
+        source_root: str,
     ) -> None:
         self.backend = self._resolve_backend(backend, model_path, module, class_name, hf_model_id)
         self.encoder_output = encoder_output
         self.device = torch.device(device)
         self.sample_rate = sample_rate
+        self.source_root = source_root
         self.feature_extractor = None
         model_path = self._resolve_model_path(
             model_path=model_path,
@@ -57,12 +60,12 @@ class WavJEPAInferenceWrapper:
                 raise ValueError("--model-path is required when --backend=torchscript")
             self.model = torch.jit.load(model_path, map_location=self.device)
         elif self.backend == "python":
-            cls = self._resolve_python_class(module, class_name)
+            cls = self._resolve_python_class(module, class_name, source_root)
             self.model = cls(model_path)
         elif self.backend == "python-ckpt":
             if not model_path:
                 raise ValueError("--model-path is required when --backend=python-ckpt")
-            cls = self._resolve_python_class(module, class_name)
+            cls = self._resolve_python_class(module, class_name, source_root)
             self.model = self._load_with_lightning(cls, model_path)
             if self.model is None:
                 self.model = self._build_python_model(cls, model_path)
@@ -70,7 +73,7 @@ class WavJEPAInferenceWrapper:
         elif self.backend == "python-safetensors":
             if not model_path:
                 raise ValueError("--model-path (or --hf-model-id) is required when --backend=python-safetensors")
-            cls = self._resolve_python_class(module, class_name)
+            cls = self._resolve_python_class(module, class_name, source_root)
             self.model = self._build_python_model(cls, model_path)
             self._load_safetensors_into_model(self.model, model_path)
         elif self.backend == "wavjepa-hf":
@@ -115,10 +118,15 @@ class WavJEPAInferenceWrapper:
         extractor = AutoFeatureExtractor.from_pretrained(repo_or_path, trust_remote_code=True)
         return model, extractor
 
-    def _resolve_python_class(self, module: str, class_name: str) -> type:
+    def _resolve_python_class(self, module: str, class_name: str, source_root: str) -> type:
         if module and class_name:
             mod = importlib.import_module(module)
             return getattr(mod, class_name)
+
+        if source_root:
+            discovered_from_source = self._discover_wavjepa_class_from_source(source_root)
+            if discovered_from_source is not None:
+                return discovered_from_source
 
         discovered = self._discover_wavjepa_class()
         if discovered is not None:
@@ -126,9 +134,48 @@ class WavJEPAInferenceWrapper:
 
         raise ValueError(
             "Could not resolve model class automatically. "
-            "Pass --module/--class-name or install official WavJEPA code (package `wavjepa`/`sjepa`) "
-            "in the current Python environment."
+            "Pass --module/--class-name, or pass --source-root pointing to cloned official WavJEPA GitHub code, "
+            "or install official WavJEPA code (package `wavjepa`/`sjepa`) in the current Python environment."
         )
+
+    def _discover_wavjepa_class_from_source(self, source_root: str) -> type | None:
+        root = Path(source_root)
+        if not root.exists() or not root.is_dir():
+            raise ValueError(f"invalid --source-root: {source_root}")
+
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+
+        scored_classes: list[tuple[int, type]] = []
+        py_files = sorted(p for p in root.rglob("*.py") if p.is_file() and p.name != "__init__.py")
+        for py in py_files:
+            rel = py.relative_to(root).with_suffix("")
+            module_name = ".".join(rel.parts)
+            if not module_name:
+                continue
+            try:
+                mod = importlib.import_module(module_name)
+            except Exception:
+                continue
+            for _, cls in inspect.getmembers(mod, inspect.isclass):
+                if cls.__module__ != mod.__name__:
+                    continue
+                if not issubclass(cls, torch.nn.Module):
+                    continue
+                name = cls.__name__.lower()
+                score = 0
+                if "jepa" in name:
+                    score += 10
+                if "wav" in name:
+                    score += 5
+                if hasattr(cls, "load_from_checkpoint"):
+                    score += 3
+                scored_classes.append((score, cls))
+
+        if not scored_classes:
+            return None
+        scored_classes.sort(key=lambda item: item[0], reverse=True)
+        return scored_classes[0][1]
 
     @staticmethod
     def _discover_wavjepa_class() -> type | None:
@@ -385,6 +432,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model-path", type=str, default="")
     p.add_argument("--hf-model-id", type=str, default="", help="Hugging Face model repo id")
     p.add_argument("--hf-filename", type=str, default="model.safetensors", help="Filename in HF repo")
+    p.add_argument("--source-root", type=str, default="", help="Path to cloned official WavJEPA GitHub source tree")
     p.add_argument("--module", type=str, default="",
                    help="Python module for model class. Optional when official wavjepa/sjepa package is installed.")
     p.add_argument("--class-name", type=str, default="",
@@ -461,6 +509,7 @@ def main() -> None:
         hf_model_id=args.hf_model_id,
         hf_filename=args.hf_filename,
         sample_rate=args.sample_rate,
+        source_root=args.source_root,
     )
 
     expected_dim: int | None = None
